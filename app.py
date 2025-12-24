@@ -82,6 +82,38 @@ def get_live_prices_bulk(tickers):
         return {col.replace('.SA', ''): data[col].iloc[-1] for col in data.columns}
     except: return {}
 
+# --- NEW HELPER: Historical Data for Graph ---
+@st.cache_data(ttl=300)
+def get_historical_comparison_data(tickers, period_label):
+    """
+    Fetches historical data. Returns absolute prices (not normalized).
+    """
+    period_map = {
+        "1 day": "1d", "7 days": "5d", "1 month": "1mo",
+        "6 months": "6mo", "YTD": "ytd", "1 year": "1y", "5 years": "5y"
+    }
+    yf_period = period_map.get(period_label, "1mo")
+    
+    # Use 5m interval for 1 day view, otherwise daily
+    interval = "5m" if yf_period == "1d" else "1d"
+    
+    formatted_tickers = [format_ticker_for_yfinance(t) for t in tickers]
+    
+    try:
+        data = yf.download(formatted_tickers, period=yf_period, interval=interval, progress=False)['Close']
+        
+        # Handle single ticker returning Series
+        if isinstance(data, pd.Series):
+            data = data.to_frame(name=formatted_tickers[0])
+            
+        # Rename columns (remove .SA)
+        data.columns = [c.replace('.SA', '') for c in data.columns]
+        
+        # Return Raw Prices (No normalization)
+        return data
+    except Exception:
+        return pd.DataFrame()
+
 def render_portfolio_view(portfolio_df):
     st.markdown("### 📈 Portfolio Performance")
     if portfolio_df.empty:
@@ -132,6 +164,55 @@ def render_portfolio_view(portfolio_df):
         comp_df = df_display[['Ticker', 'Average Price', 'Current Price']].melt(id_vars='Ticker', var_name='Type', value_name='Price')
         fig_c = px.bar(comp_df, x='Ticker', y='Price', color='Type', barmode='group', color_discrete_map={'Average Price': 'gray', 'Current Price': '#00CC96'})
         st.plotly_chart(fig_c, use_container_width=True)
+    
+    # --- NEW: Historical Performance Chart ---
+    st.divider()
+    st.subheader("⏳ Asset Price History")
+    
+    # Layout: 3 parts stock selector, 1 part period selector
+    col_hist1, col_hist2 = st.columns([3, 1])
+    
+    with col_hist1:
+        # Default to top 5 assets if available, otherwise all
+        avail_tickers = sorted(df_display['Ticker'].unique().tolist())
+        default_sel = avail_tickers[:5] if len(avail_tickers) >= 5 else avail_tickers
+        
+        selected_comparison = st.multiselect(
+            "Select assets to compare (Max 5):", 
+            options=avail_tickers, 
+            default=default_sel,
+            max_selections=5
+        )
+
+    with col_hist2:
+        selected_period = st.selectbox(
+            "Time Period:", 
+            ["1 day", "7 days", "1 month", "6 months", "YTD", "1 year", "5 years"],
+            index=3 # Default to 6 months
+        )
+
+    if selected_comparison:
+        with st.spinner("Fetching historical data..."):
+            hist_data = get_historical_comparison_data(selected_comparison, selected_period)
+            
+        if not hist_data.empty:
+            fig_hist = px.line(
+                hist_data, 
+                x=hist_data.index, 
+                y=hist_data.columns,
+                title=f"Price History (R$) - {selected_period}",
+                labels={"value": "Price (R$)", "variable": "Asset", "index": "Date"}
+            )
+            # Rangeslider enabled for "click and drag" zooming
+            fig_hist.update_xaxes(rangeslider_visible=True)
+            
+            fig_hist.update_layout(hovermode="x unified", template="plotly_dark", height=500, legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"))
+            fig_hist.update_yaxes(tickprefix="R$ ")
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.warning("No data available for the selected period/assets.")
+    else:
+        st.info("Select at least one asset to view performance.")
 
 # ==============================================================================
 # PART 3: TECH SCANNER LOGIC
