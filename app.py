@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import yfinance as yf
 import os
+from streamlit_gsheets import GSheetsConnection
 
 # --- Configuration ---
 st.set_page_config(page_title="Investment Dashboard", layout="wide")
@@ -26,21 +27,50 @@ def format_ticker_for_yfinance(ticker):
     return t
 
 @st.cache_data
-def load_csv_data(file_path):
+def load_data(source="data.csv"):
+    """Loads data from Google Sheets or local CSV."""
     try:
-        df = pd.read_csv(file_path)
-        def clean_currency(x):
-            if isinstance(x, str):
-                clean_str = x.replace('R$', '').replace('.', '').replace(',', '.').strip()
-                try: return float(clean_str)
-                except ValueError: return 0.0
-            return x
-        currency_cols = ['Preço', 'Custo total com taxas', 'Preço médio com taxas', 'Taxas totais']
-        for col in currency_cols:
-            if col in df.columns: df[col] = df[col].apply(clean_currency)
-        if 'Data' in df.columns: df['Data'] = pd.to_datetime(df['Data'])
-        return df
-    except FileNotFoundError: return None
+        # 1. Try Google Sheets first
+        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+            try:
+                conn = st.connection("gsheets", type=GSheetsConnection)
+                # Attempt to read from URL in secrets or provided default
+                url = st.secrets["connections"]["gsheets"].get("spreadsheet", None)
+                if url:
+                    df = conn.read(spreadsheet=url)
+                    # Data cleaning logic
+                    def clean_currency(x):
+                        if isinstance(x, (int, float)): return float(x)
+                        if isinstance(x, str):
+                            clean_str = x.replace('R$', '').replace('.', '').replace(',', '.').strip()
+                            try: return float(clean_str)
+                            except ValueError: return 0.0
+                        return 0.0
+                    
+                    currency_cols = ['Preço', 'Custo total com taxas', 'Preço médio com taxas', 'Taxas totais']
+                    for col in currency_cols:
+                        if col in df.columns: df[col] = df[col].apply(clean_currency)
+                    if 'Data' in df.columns: df['Data'] = pd.to_datetime(df['Data'])
+                    return df
+            except Exception as e:
+                st.warning(f"Google Sheets connection failed: {e}. Falling back to CSV.")
+        
+        # 2. Fallback to local CSV
+        if os.path.exists(source):
+            df = pd.read_csv(source)
+            def clean_currency(x):
+                if isinstance(x, str):
+                    clean_str = x.replace('R$', '').replace('.', '').replace(',', '.').strip()
+                    try: return float(clean_str)
+                    except ValueError: return 0.0
+                return x
+            currency_cols = ['Preço', 'Custo total com taxas', 'Preço médio com taxas', 'Taxas totais']
+            for col in currency_cols:
+                if col in df.columns: df[col] = df[col].apply(clean_currency)
+            if 'Data' in df.columns: df['Data'] = pd.to_datetime(df['Data'])
+            return df
+        return pd.DataFrame()
+    except Exception: return pd.DataFrame()
 
 # ==============================================================================
 # PART 2: PORTFOLIO LOGIC
@@ -327,8 +357,9 @@ def render_scanner_view(default_portfolio_df):
 
 st.title("📊 Investment Command Center")
 
-df_main = load_csv_data("data.csv")
-if df_main is None: df_main = pd.DataFrame()
+df_main = load_data("data.csv")
+if df_main.empty: 
+    st.warning("No data found. Please check data.csv or your Google Sheets connection.")
 
 # GLOBAL CALCULATION (Prevents data lag)
 with st.spinner("Initializing Data..."):
